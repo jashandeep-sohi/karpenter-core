@@ -21,7 +21,6 @@ import (
 	"sort"
 	"time"
 
-	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/clock"
 	"knative.dev/pkg/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,7 +32,6 @@ import (
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
 	"github.com/aws/karpenter-core/pkg/metrics"
-	"github.com/aws/karpenter-core/pkg/scheduling"
 )
 
 // consolidation is the base consolidation controller that provides common functionality used across the different
@@ -97,6 +95,30 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 		c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("provisioner %s has consolidation disabled", cn.provisioner.Name))...)
 		return false
 	}
+
+	// only allow spot nodes if they are annotated
+	if cn.capacityType == v1alpha5.CapacityTypeSpot {
+
+		val, ok := cn.Node.Annotations[v1alpha5.SpotConsolidateAfterAnnotationKey]
+
+		if !ok {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, "spot node is not annotated to allow consolidation")...)
+			return false
+		}
+
+		spotConsolidateAfterDuration, err := time.ParseDuration(val)
+		if err != nil {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, "failed to parse spot consolidation annotation duration")...)
+			return false
+		}
+
+		if c.clock.Now().Before(cn.Node.CreationTimestamp.Add(spotConsolidateAfterDuration)) {
+			wait := cn.Node.CreationTimestamp.Add(spotConsolidateAfterDuration).Sub(c.clock.Now())
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("%v until spot consolidate wait expires", wait))...)
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -153,33 +175,6 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		}
 		// no instance types remain after filtering by price
 		return Command{action: actionDoNothing}, nil
-	}
-
-	// If the existing candidates are all spot and the replacement is spot, we don't consolidate.  We don't have a reliable
-	// mechanism to determine if this replacement makes sense given instance type availability (e.g. we may replace
-	// a spot node with one that is less available and more likely to be reclaimed).
-	allExistingAreSpot := true
-	for _, cn := range candidates {
-		if cn.capacityType != v1alpha5.CapacityTypeSpot {
-			allExistingAreSpot = false
-		}
-	}
-
-	if allExistingAreSpot &&
-		results.NewMachines[0].Requirements.Get(v1alpha5.LabelCapacityType).Has(v1alpha5.CapacityTypeSpot) {
-		if len(candidates) == 1 {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, "can't replace a spot node with a spot node")...)
-		}
-		return Command{action: actionDoNothing}, nil
-	}
-
-	// We are consolidating a node from OD -> [OD,Spot] but have filtered the instance types by cost based on the
-	// assumption, that the spot variant will launch. We also need to add a requirement to the node to ensure that if
-	// spot capacity is insufficient we don't replace the node with a more expensive on-demand node.  Instead the launch
-	// should fail and we'll just leave the node alone.
-	ctReq := results.NewMachines[0].Requirements.Get(v1alpha5.LabelCapacityType)
-	if ctReq.Has(v1alpha5.CapacityTypeSpot) && ctReq.Has(v1alpha5.CapacityTypeOnDemand) {
-		results.NewMachines[0].Requirements.Add(scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, v1alpha5.CapacityTypeSpot))
 	}
 
 	return Command{

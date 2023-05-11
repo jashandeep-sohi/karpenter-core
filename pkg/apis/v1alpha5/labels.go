@@ -47,6 +47,10 @@ const (
 	VoluntaryDisruptionAnnotationKey  = Group + "/voluntary-disruption"
 	MachineLinkedAnnotationKey        = Group + "/linked"
 
+	// allows opt-in replace consolidation of spot instances after set duration
+	// from node creation
+	SpotConsolidateAfterAnnotationKey = Group + "/spot-consolidate-after"
+
 	ProviderCompatabilityAnnotationKey = CompatabilityGroup + "/provider"
 
 	// Karpenter specific annotation values
