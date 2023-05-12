@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
@@ -47,6 +48,13 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 	candidates, err := m.sortAndFilterCandidates(ctx, candidates)
 	if err != nil {
 		return Command{}, fmt.Errorf("sorting candidates, %w", err)
+	}
+
+	// introduce some chaos occasionally
+	if rand.Float64() < 0.3 {
+		rand.Shuffle(len(candidates), func(i, j int) {
+			candidates[i], candidates[j] = candidates[j], candidates[i]
+		})
 	}
 
 	// For now, we will consider up to every machine in the cluster, might be configurable in the future.
