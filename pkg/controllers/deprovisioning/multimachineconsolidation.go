@@ -21,6 +21,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
+	"knative.dev/pkg/logging"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
@@ -55,6 +56,7 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 		return Command{}, err
 	}
 	if cmd.action == actionDoNothing {
+		logging.FromContext(ctx).Debug("multi consolidation does nothing")
 		return cmd, nil
 	}
 

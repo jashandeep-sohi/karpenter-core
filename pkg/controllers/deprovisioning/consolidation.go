@@ -19,9 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/samber/lo"
 	"k8s.io/utils/clock"
+	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -113,8 +116,7 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 		}
 
 		if c.clock.Now().Before(cn.Node.CreationTimestamp.Add(spotConsolidateAfterDuration)) {
-			wait := cn.Node.CreationTimestamp.Add(spotConsolidateAfterDuration).Sub(c.clock.Now())
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("%v until spot consolidate wait expires", wait))...)
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, "waiting for spot consolidation timeout")...)
 			return false
 		}
 	}
@@ -127,6 +129,13 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 // nolint:gocyclo
 func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...*Candidate) (Command, error) {
 	defer metrics.Measure(deprovisioningDurationHistogram.WithLabelValues("Replace/Delete"))()
+
+	candidateInstanceTypes := strings.Join(lo.Map(candidates, func(i *Candidate, _ int) string {
+		return i.instanceType.Name
+	}), " + ")
+
+	logging.FromContext(ctx).Debugf("consolidation candidates: %s", candidateInstanceTypes)
+
 	// Run scheduling simulation to compute consolidation option
 	results, err := simulateScheduling(ctx, c.kubeClient, c.cluster, c.provisioner, candidates...)
 	if err != nil {
@@ -168,10 +177,15 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 	if err != nil {
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
+
+	newInstanceTypes := strings.Join(lo.Map(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), func(i *cloudprovider.InstanceType, _ int) string {
+		return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available(), results.NewMachines[0].Requirements))
+	}), " | ")
+
 	results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
 	if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-		if len(candidates) == 1 {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, "can't replace with a cheaper node")...)
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f) with a cheaper node from %s", candidateInstanceTypes, nodesPrice, newInstanceTypes))...)
 		}
 		// no instance types remain after filtering by price
 		return Command{action: actionDoNothing}, nil
