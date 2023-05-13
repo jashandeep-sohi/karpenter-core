@@ -20,6 +20,7 @@ import (
 	"math"
 	"math/rand"
 
+	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
 	"knative.dev/pkg/logging"
@@ -41,10 +42,41 @@ func NewMultiMachineConsolidation(clk clock.Clock, cluster *state.Cluster, kubeC
 	return &MultiMachineConsolidation{makeConsolidation(clk, cluster, kubeClient, provisioner, cp, recorder)}
 }
 
-func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidates ...*Candidate) (Command, error) {
+func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidates ...*Candidate) (cmd Command, errs error) {
 	if m.cluster.Consolidated() {
 		return Command{action: actionDoNothing}, nil
 	}
+
+	// first attempt to consolidate patitioned by provisioner
+	candidatesByProvisioner := lo.GroupBy(candidates, func(c *Candidate) string {
+		return c.provisioner.Name
+	})
+
+	for provisionerName, provisionerCandidates := range candidatesByProvisioner {
+		log := logging.FromContext(ctx).
+			With("provisioner", provisionerName, "candidates", provisionerCandidates)
+
+		log.Debug("attempting partitioned multimachine consolidation")
+
+		cmd, err := m.computeCommand(ctx, provisionerCandidates...)
+		if err != nil {
+			log.Error(err)
+			// try the next provisioner
+			continue
+		}
+
+		if cmd.action != actionDoNothing {
+			return cmd, nil
+		}
+
+		log.Debug("doing nothing")
+	}
+
+	// finaly try them all together (old behavior)
+	return m.computeCommand(ctx, candidates...)
+}
+
+func (m *MultiMachineConsolidation) computeCommand(ctx context.Context, candidates ...*Candidate) (Command, error) {
 	candidates, err := m.sortAndFilterCandidates(ctx, candidates)
 	if err != nil {
 		return Command{}, fmt.Errorf("sorting candidates, %w", err)
@@ -64,7 +96,6 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 		return Command{}, err
 	}
 	if cmd.action == actionDoNothing {
-		logging.FromContext(ctx).Debug("multi consolidation does nothing")
 		return cmd, nil
 	}
 

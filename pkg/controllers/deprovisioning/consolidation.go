@@ -165,8 +165,10 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// we're not going to turn a single node into multiple candidates
 	if len(results.NewMachines) != 1 {
-		if len(candidates) == 1 {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, fmt.Sprintf("can't remove without creating %d candidates", len(results.NewMachines)))...)
+		msg := fmt.Sprintf("do nothing: can't turn %d nodes into %d nodes", len(candidates), len(results.NewMachines))
+		logging.FromContext(ctx).Debugf(msg)
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
 		}
 		return Command{action: actionDoNothing}, nil
 	}
