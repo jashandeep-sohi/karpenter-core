@@ -53,8 +53,12 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 	})
 
 	for provisionerName, provisionerCandidates := range candidatesByProvisioner {
+		candidateTypes := lo.Map(provisionerCandidates, func(c *Candidate, _ int) string {
+			return c.instanceType.Name
+		})
+
 		log := logging.FromContext(ctx).
-			With("provisioner", provisionerName, "candidates", provisionerCandidates)
+			With("provisioner", provisionerName, "candidatesTypes", candidateTypes)
 
 		log.Debug("attempting partitioned multimachine consolidation")
 
