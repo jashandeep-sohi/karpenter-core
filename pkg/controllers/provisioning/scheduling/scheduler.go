@@ -253,10 +253,14 @@ func (s *Scheduler) add(ctx context.Context, pod *v1.Pod) error {
 			logging.FromContext(ctx).With(
 				"provisionerInstanceTypes", lo.Map(s.instanceTypes[machineTemplate.ProvisionerName], func(it *cloudprovider.InstanceType, _ int) interface{} {
 					return struct {
-						Name     string
-						Capacity v1.ResourceList
+						Name           string
+						AvailableZones []string
+						Capacity       v1.ResourceList
 					}{
 						it.Name,
+						lo.Uniq(lo.Map(it.Offerings.Available(), func(of cloudprovider.Offering, _ int) string {
+							return of.Zone
+						})),
 						it.Capacity,
 					}
 				}),
