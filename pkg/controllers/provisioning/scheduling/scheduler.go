@@ -250,6 +250,17 @@ func (s *Scheduler) add(ctx context.Context, pod *v1.Pod) error {
 
 		machine := NewMachine(machineTemplate, s.topology, s.daemonOverhead[machineTemplate], instanceTypes)
 		if err := machine.Add(ctx, pod); err != nil {
+			logging.FromContext(ctx).With(
+				"provisionerInstanceTypes", lo.Map(s.instanceTypes[machineTemplate.ProvisionerName], func(it *cloudprovider.InstanceType, _ int) interface{} {
+					return struct {
+						Name     string
+						Capacity v1.ResourceList
+					}{
+						it.Name,
+						it.Capacity,
+					}
+				}),
+			).Debug("failed to add pod to machine")
 			errs = multierr.Append(errs, fmt.Errorf("incompatible with provisioner %q, %w", machineTemplate.ProvisionerName, err))
 			continue
 		}

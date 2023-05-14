@@ -102,12 +102,10 @@ func (m *Machine) Add(ctx context.Context, pod *v1.Pod) error {
 				"mergedRequests", requests,
 				"machineInstanceTypeOptions", lo.Map(m.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) interface{} {
 					return struct {
-						Name      string
-						Offerings cloudprovider.Offerings
-						Capacity  v1.ResourceList
+						Name     string
+						Capacity v1.ResourceList
 					}{
 						it.Name,
-						it.Offerings,
 						it.Capacity,
 					}
 				}),
