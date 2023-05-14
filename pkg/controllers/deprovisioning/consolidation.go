@@ -182,13 +182,13 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
 
-	newInstanceTypes := strings.Join(lo.Map(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), func(i *cloudprovider.InstanceType, _ int) string {
+	newInstanceTypes := strings.Join(lo.Map(lo.Slice(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), 0, 5), func(i *cloudprovider.InstanceType, _ int) string {
 		return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available(), results.NewMachines[0].Requirements))
 	}), " | ")
 
 	results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
 	if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-		logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s", candidateInstanceTypes, nodesPrice, newInstanceTypes)
+		logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s ...", candidateInstanceTypes, nodesPrice, newInstanceTypes)
 
 		for _, cn := range candidates {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f) with a cheaper node", candidateInstanceTypes, nodesPrice))...)
