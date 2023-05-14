@@ -88,9 +88,10 @@ func (m *MultiMachineConsolidation) computeCommand(ctx context.Context, candidat
 
 	// introduce some chaos occasionally
 	if rand.Float64() < 0.3 {
-		rand.Shuffle(len(candidates), func(i, j int) {
+		// reverse
+		for i, j := 0, len(candidates)-1; i < j; i, j = i+1, j-1 {
 			candidates[i], candidates[j] = candidates[j], candidates[i]
-		})
+		}
 	}
 
 	// For now, we will consider up to every machine in the cluster, might be configurable in the future.
