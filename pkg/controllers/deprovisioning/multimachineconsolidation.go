@@ -108,8 +108,17 @@ func (m *MultiMachineConsolidation) computeCommand(ctx context.Context, candidat
 	if err != nil {
 		return Command{}, err
 	}
+
 	if cmd.action == actionDoNothing {
-		return cmd, nil
+		// Consider all candidates together
+		cmd, err = m.computeConsolidation(ctx, candidates...)
+		if err != nil {
+			return Command{}, err
+		}
+
+		if cmd.action == actionDoNothing {
+			return cmd, nil
+		}
 	}
 
 	v := NewValidation(consolidationTTL, m.clock, m.cluster, m.kubeClient, m.provisioner, m.cloudProvider, m.recorder)
