@@ -100,7 +100,17 @@ func (m *Machine) Add(ctx context.Context, pod *v1.Pod) error {
 				"machineReqeusts", m.Requests,
 				"podRequests", resources.RequestsForPods(pod),
 				"mergedRequests", requests,
-				"machineInstanceTypeOptions", m.InstanceTypeOptions,
+				"machineInstanceTypeOptions", lo.Map(m.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) interface{} {
+					return struct {
+						Name      string
+						Offerings cloudprovider.Offerings
+						Capacity  v1.ResourceList
+					}{
+						it.Name,
+						it.Offerings,
+						it.Capacity,
+					}
+				}),
 				"machineRequirements", machineRequirements,
 			).Debug("no instance type found for pod")
 		return fmt.Errorf("no instance type satisfied resources %s and requirements %s", resources.String(resources.RequestsForPods(pod)), machineRequirements)
