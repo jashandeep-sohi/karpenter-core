@@ -148,6 +148,10 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, err
 	}
 
+	logging.FromContext(ctx).
+		With("newMachines", results.NewMachines).
+		Debugf("scheduling simulation results")
+
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
 		logging.FromContext(ctx).Debugf("%v", results.PodSchedulingErrors())
