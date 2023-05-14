@@ -148,8 +148,6 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
-		logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes).Debugf("failed to schedule all pods: %v", results.PodSchedulingErrors())
-
 		// This method is used by multi-node consolidation as well, so we'll only report in the single node case
 		if len(candidates) == 1 {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, results.PodSchedulingErrors())...)
@@ -165,15 +163,14 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		}, nil
 	}
 
-	// we're not going to increase the number of nodes
-	if len(results.NewMachines)-len(candidates) > 0 {
-		msg := fmt.Sprintf("do nothing: can't turn %d (%s) nodes into %d nodes", len(candidates), candidateInstanceTypes, len(results.NewMachines))
-		logging.FromContext(ctx).Debugf(msg)
-		for _, cn := range candidates {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
-		}
-		return Command{action: actionDoNothing}, nil
-	}
+	//if len(results.NewMachines) > len(candidates) {
+	//	msg := fmt.Sprintf("do nothing: can't turn %d (%s) nodes into %d nodes", len(candidates), candidateInstanceTypes, len(results.NewMachines))
+	//	logging.FromContext(ctx).Debugf(msg)
+	//	for _, cn := range candidates {
+	//		c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
+	//	}
+	//	return Command{action: actionDoNothing}, nil
+	//}
 
 	// when consolidating to 1 node, make sure it's actually cheaper
 	// TODO: figure out how to do this when replacing with multiple nodes
