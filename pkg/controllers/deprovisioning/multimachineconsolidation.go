@@ -57,12 +57,13 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 			return c.instanceType.Name
 		})
 
-		log := logging.FromContext(ctx).
-			With("provisioner", provisionerName, "candidatesTypes", candidateTypes)
+		childCtx := logging.WithLogger(ctx, logging.FromContext(ctx).With("provisioner", provisionerName, "provisionerCandidates", candidateTypes))
+
+		log := logging.FromContext(childCtx)
 
 		log.Debug("attempting partitioned multimachine consolidation")
 
-		cmd, err := m.computeCommand(ctx, provisionerCandidates...)
+		cmd, err := m.computeCommand(childCtx, provisionerCandidates...)
 		if err != nil {
 			log.Error(err)
 			// try the next provisioner

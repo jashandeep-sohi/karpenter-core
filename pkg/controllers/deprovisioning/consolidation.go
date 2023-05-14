@@ -134,7 +134,9 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return i.instanceType.Name
 	}), " + ")
 
-	logging.FromContext(ctx).Debugf("consolidation candidates: %s", candidateInstanceTypes)
+	ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes))
+
+	logging.FromContext(ctx).Debugf("computing consolidation")
 
 	// Run scheduling simulation to compute consolidation option
 	results, err := simulateScheduling(ctx, c.kubeClient, c.cluster, c.provisioner, candidates...)
@@ -148,6 +150,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
+		logging.FromContext(ctx).Debugf("%v", results.PodSchedulingErrors())
 		// This method is used by multi-node consolidation as well, so we'll only report in the single node case
 		if len(candidates) == 1 {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, results.PodSchedulingErrors())...)
@@ -157,44 +160,41 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// were we able to schedule all the pods on the inflight candidates?
 	if len(results.NewMachines) == 0 {
+		logging.FromContext(ctx).Debug("no new machines needed")
 		return Command{
 			candidates: candidates,
-			action:     actionDelete,
 		}, nil
 	}
 
-	//if len(results.NewMachines) > len(candidates) {
-	//	msg := fmt.Sprintf("do nothing: can't turn %d (%s) nodes into %d nodes", len(candidates), candidateInstanceTypes, len(results.NewMachines))
-	//	logging.FromContext(ctx).Debugf(msg)
-	//	for _, cn := range candidates {
-	//		c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
-	//	}
-	//	return Command{action: actionDoNothing}, nil
-	//}
-
-	// when consolidating to 1 node, make sure it's actually cheaper
-	// TODO: figure out how to do this when replacing with multiple nodes
-	if len(results.NewMachines) == 1 {
-
-		// get the current node price based on the offering
-		// fallback if we can't find the specific zonal pricing data
-		nodesPrice, err := getCandidatePrices(candidates)
-		if err != nil {
-			return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
+	if len(results.NewMachines) != 1 {
+		msg := fmt.Sprintf("won't turn %d (%s) nodes into %d nodes", len(candidates), candidateInstanceTypes, len(results.NewMachines))
+		logging.FromContext(ctx).Debugf(msg)
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
 		}
+		return Command{action: actionDoNothing}, nil
+	}
 
-		newInstanceTypes := strings.Join(lo.Map(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), func(i *cloudprovider.InstanceType, _ int) string {
-			return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available(), results.NewMachines[0].Requirements))
-		}), " | ")
+	// get the current node price based on the offering
+	// fallback if we can't find the specific zonal pricing data
+	nodesPrice, err := getCandidatePrices(candidates)
+	if err != nil {
+		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
+	}
 
-		results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
-		if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-			for _, cn := range candidates {
-				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f) with a cheaper node from %s", candidateInstanceTypes, nodesPrice, newInstanceTypes))...)
-			}
-			// no instance types remain after filtering by price
-			return Command{action: actionDoNothing}, nil
+	newInstanceTypes := strings.Join(lo.Map(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), func(i *cloudprovider.InstanceType, _ int) string {
+		return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available(), results.NewMachines[0].Requirements))
+	}), " | ")
+
+	results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
+	if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
+		logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s", candidateInstanceTypes, nodesPrice, newInstanceTypes)
+
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f) with a cheaper node", candidateInstanceTypes, nodesPrice))...)
 		}
+		// no instance types remain after filtering by price
+		return Command{action: actionDoNothing}, nil
 	}
 
 	return Command{
