@@ -148,7 +148,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
-		logging.FromContext(ctx).Debugf("failed to schedule all pods: %v", results.PodSchedulingErrors())
+		logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes).Debugf("failed to schedule all pods: %v", results.PodSchedulingErrors())
 
 		// This method is used by multi-node consolidation as well, so we'll only report in the single node case
 		if len(candidates) == 1 {
