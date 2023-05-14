@@ -88,9 +88,17 @@ func (m *MultiMachineConsolidation) computeCommand(ctx context.Context, candidat
 
 	// introduce some chaos occasionally
 	if rand.Float64() < 0.3 {
-		// reverse
-		for i, j := 0, len(candidates)-1; i < j; i, j = i+1, j-1 {
-			candidates[i], candidates[j] = candidates[j], candidates[i]
+		if rand.Float64() < 0.5 {
+			logging.FromContext(ctx).Debug("reversing candidate disruption order")
+			// reverse
+			for i, j := 0, len(candidates)-1; i < j; i, j = i+1, j-1 {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		} else {
+			logging.FromContext(ctx).Debug("shuffling candidates")
+			rand.Shuffle(len(candidates), func(i, j int) {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			})
 		}
 	}
 
