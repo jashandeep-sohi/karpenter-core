@@ -22,6 +22,7 @@ import (
 
 	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
+	"knative.dev/pkg/logging"
 
 	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
@@ -93,6 +94,15 @@ func (m *Machine) Add(ctx context.Context, pod *v1.Pod) error {
 	requests := resources.Merge(m.Requests, resources.RequestsForPods(pod))
 	instanceTypes := filterInstanceTypesByRequirements(m.InstanceTypeOptions, machineRequirements, requests)
 	if len(instanceTypes) == 0 {
+		logging.FromContext(ctx).
+			With(
+				"podName", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+				"machineReqeusts", m.Requests,
+				"podRequests", resources.RequestsForPods(pod),
+				"mergedRequests", requests,
+				"machineInstanceTypeOptions", m.InstanceTypeOptions,
+				"machineRequirements", machineRequirements,
+			).Debug("no instance type found for pod")
 		return fmt.Errorf("no instance type satisfied resources %s and requirements %s", resources.String(resources.RequestsForPods(pod)), machineRequirements)
 	}
 
