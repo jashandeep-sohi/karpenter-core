@@ -149,8 +149,8 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 	}
 
 	logging.FromContext(ctx).
-		With("newMachines", results.NewMachines).
-		Debugf("scheduling simulation results")
+		With("newMachineNum", len(results.NewMachines)).
+		Debug("scheduling simulation results")
 
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
@@ -161,6 +161,9 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		}
 		return Command{action: actionDoNothing}, nil
 	}
+
+	logging.FromContext(ctx).
+		Debug("all pods scheduled")
 
 	// were we able to schedule all the pods on the inflight candidates?
 	if len(results.NewMachines) == 0 {
