@@ -67,7 +67,6 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 
 		cmd, err := m.computeCommand(childCtx, provisionerCandidates...)
 		if err != nil {
-			log.Error(err)
 			// try the next provisioner
 			continue
 		}
@@ -75,8 +74,6 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 		if cmd.action != actionDoNothing {
 			return cmd, nil
 		}
-
-		log.Debug("doing nothing")
 	}
 
 	// finaly try them all together (old behavior)
@@ -155,15 +152,6 @@ func (m *MultiMachineConsolidation) firstNMachineConsolidationOption(ctx context
 		action, err := m.computeConsolidation(ctx, candidatesToConsolidate...)
 		if err != nil {
 			return Command{}, err
-		}
-
-		// ensure that the action is sensical for replacements, see explanation on filterOutSameType for why this is
-		// required
-		if action.action == actionReplace {
-			action.replacements[0].InstanceTypeOptions = filterOutSameType(action.replacements[0], candidatesToConsolidate)
-			if len(action.replacements[0].InstanceTypeOptions) == 0 {
-				action.action = actionDoNothing
-			}
 		}
 
 		if action.action == actionReplace || action.action == actionDelete {

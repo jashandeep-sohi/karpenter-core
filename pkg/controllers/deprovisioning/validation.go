@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/samber/lo"
 	"k8s.io/utils/clock"
 	"knative.dev/pkg/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -28,6 +29,7 @@ import (
 	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
+	"github.com/aws/karpenter-core/pkg/controllers/provisioning/scheduling"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
 )
@@ -148,14 +150,19 @@ func (v *Validation) ValidateCommand(ctx context.Context, cmd Command, candidate
 		return false, nil
 	}
 
-	// we need more than one replacement machine which is never valid currently (all of our node replacement is m->1, never m->n)
-	if len(results.NewMachines) > 1 {
-		return false, nil
-	}
-
 	// we now know that scheduling simulation wants to create one new machine
 	if len(cmd.replacements) == 0 {
 		// but we weren't expecting any new nodes, so this is invalid
+		return false, nil
+	}
+
+	// never allow replacing multiple with multiple (1 -> multiple is ok)
+	if len(candidates) > 1 && len(results.NewMachines) > 1 {
+		return false, nil
+	}
+
+	// must create the same number of machines
+	if len(cmd.replacements) != len(results.NewMachines) {
 		return false, nil
 	}
 
@@ -170,7 +177,14 @@ func (v *Validation) ValidateCommand(ctx context.Context, cmd Command, candidate
 	// a 4xlarge and replace it with a 2xlarge. If things have changed and the scheduling simulation we just performed
 	// now says that we need to launch a 4xlarge. It's still launching the correct number of machines, but it's just
 	// as expensive or possibly more so we shouldn't validate.
-	if !instanceTypesAreSubset(cmd.replacements[0].InstanceTypeOptions, results.NewMachines[0].InstanceTypeOptions) {
+	if !instanceTypesAreSubset(
+		lo.FlatMap(cmd.replacements, func(m *scheduling.Machine, _ int) []*cloudprovider.InstanceType {
+			return m.InstanceTypeOptions
+		}),
+		lo.FlatMap(results.NewMachines, func(m *scheduling.Machine, _ int) []*cloudprovider.InstanceType {
+			return m.InstanceTypeOptions
+		}),
+	) {
 		return false, nil
 	}
 

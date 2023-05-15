@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/samber/lo"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/clock"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
@@ -32,9 +33,11 @@ import (
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
 	deprovisioningevents "github.com/aws/karpenter-core/pkg/controllers/deprovisioning/events"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
+	pscheduling "github.com/aws/karpenter-core/pkg/controllers/provisioning/scheduling"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
 	"github.com/aws/karpenter-core/pkg/metrics"
+	"github.com/aws/karpenter-core/pkg/scheduling"
 )
 
 // consolidation is the base consolidation controller that provides common functionality used across the different
@@ -130,9 +133,9 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...*Candidate) (Command, error) {
 	defer metrics.Measure(deprovisioningDurationHistogram.WithLabelValues("Replace/Delete"))()
 
-	candidateInstanceTypes := strings.Join(lo.Map(candidates, func(i *Candidate, _ int) string {
+	candidateInstanceTypes := lo.Map(candidates, func(i *Candidate, _ int) string {
 		return i.instanceType.Name
-	}), "+")
+	})
 
 	ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes))
 
@@ -148,13 +151,8 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, err
 	}
 
-	logging.FromContext(ctx).
-		With("newMachineNum", len(results.NewMachines)).
-		Debug("scheduling simulation results")
-
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
-		logging.FromContext(ctx).Debugf("%v", results.PodSchedulingErrors())
 		// This method is used by multi-node consolidation as well, so we'll only report in the single node case
 		if len(candidates) == 1 {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, results.PodSchedulingErrors())...)
@@ -162,14 +160,18 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{action: actionDoNothing}, nil
 	}
 
-	logging.FromContext(ctx).
-		Debug("all pods scheduled")
-
 	// were we able to schedule all the pods on the inflight candidates?
 	if len(results.NewMachines) == 0 {
-		logging.FromContext(ctx).Debug("no new machines needed")
 		return Command{
 			candidates: candidates,
+		}, nil
+	}
+
+	// never turn multiple nodes into multiple, but allow 1 node to be turned
+	// into multiple
+	if len(candidates) > 1 && len(results.NewMachines) > 1 {
+		return Command{
+			action: actionDoNothing,
 		}, nil
 	}
 
@@ -180,45 +182,59 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
 
-	if len(results.NewMachines) != 1 {
-		newNodesPrice := float64(0)
-		for _, n := range results.NewMachines {
-			var cheapestInstanceTypeOption *cloudprovider.InstanceType
-			for _, i := range n.InstanceTypeOptions {
-				cheapestOffer := i.Offerings.Available().Requirements(n.Requirements).Cheapest()
-				if cheapestInstanceTypeOption == nil || cheapestOffer.Price < cheapestInstanceTypeOption.Offerings[0].Price {
-					cheapestInstanceTypeOption = i
-				}
+	newNodesPrice := float64(0)
+	for _, n := range results.NewMachines {
+		var cheapestInstanceType *cloudprovider.InstanceType
+		var cheapestOffering *cloudprovider.Offering
+		for _, i := range n.InstanceTypeOptions {
+			of := i.Offerings.Available().Requirements(n.Requirements).Cheapest()
+			if cheapestInstanceType == nil || cheapestOffering == nil || of.Price < cheapestOffering.Price {
+				cheapestInstanceType = i
+				cheapestOffering = &of
 			}
-			n.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceTypeOption}
-			newNodesPrice += cheapestInstanceTypeOption.Offerings.Cheapest().Price
 		}
 
-		if newNodesPrice > nodesPrice {
-			logging.FromContext(ctx).
-				With("newNodesPrice", newNodesPrice).
-				With("candidateNodesPrice", nodesPrice).
-				Debugf("not replacing candidates with more expensive nodes")
-
-			return Command{action: actionDoNothing}, nil
+		if cheapestInstanceType == nil || cheapestOffering == nil {
+			continue
 		}
-	} else {
-		newInstanceTypesSample := strings.Join(lo.Map(lo.Slice(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), 0, 5), func(i *cloudprovider.InstanceType, _ int) string {
-			return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available().Requirements(results.NewMachines[0].Requirements), results.NewMachines[0].Requirements))
-		}), "|")
 
-		results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
-
-		if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-			logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s...", candidateInstanceTypes, nodesPrice, newInstanceTypesSample)
-
-			for _, cn := range candidates {
-				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f)/hr with a cheaper node", candidateInstanceTypes, nodesPrice))...)
-			}
-			// no instance types remain after filtering by price
-			return Command{action: actionDoNothing}, nil
-		}
+		n.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceType}
+		n.Requirements.Add(
+			scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, cheapestOffering.CapacityType),
+			scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, cheapestOffering.Zone),
+		)
+		newNodesPrice += cheapestOffering.Price
 	}
+
+	candidateInstanceTypesWithPrices := strings.Join(lo.Map(candidates, func(c *Candidate, _ int) string {
+		of, _ := c.instanceType.Offerings.Get(c.capacityType, c.zone)
+		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", c.instanceType.Name, c.capacityType, c.zone, of.Price)
+	}), ", ")
+
+	newInstanceTypesWithPrices := strings.Join(lo.Map(results.NewMachines, func(m *pscheduling.Machine, _ int) string {
+		it := m.InstanceTypeOptions[0]
+		of := it.Offerings.Requirements(m.Requirements).Cheapest()
+		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", it.Name, of.CapacityType, of.Zone, of.Price)
+	}), ", ")
+
+	if nodesPrice-newNodesPrice < 0.0001 {
+		msg := fmt.Sprintf("will not replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
+		logging.FromContext(ctx).
+			With("newNodesPrice", newNodesPrice).
+			With("candidateNodesPrice", nodesPrice).
+			Debug(msg)
+
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
+		}
+
+		return Command{action: actionDoNothing}, nil
+	}
+
+	logging.FromContext(ctx).
+		With("newNodesPrice", newNodesPrice).
+		With("candidateNodesPrice", nodesPrice).
+		Debugf("replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
 
 	return Command{
 		candidates:   candidates,
