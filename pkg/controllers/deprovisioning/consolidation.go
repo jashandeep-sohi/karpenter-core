@@ -132,7 +132,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	candidateInstanceTypes := strings.Join(lo.Map(candidates, func(i *Candidate, _ int) string {
 		return i.instanceType.Name
-	}), " + ")
+	}), "+")
 
 	ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes))
 
@@ -173,15 +173,6 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		}, nil
 	}
 
-	if len(results.NewMachines) != 1 {
-		msg := fmt.Sprintf("won't turn %d (%s) nodes into %d nodes", len(candidates), candidateInstanceTypes, len(results.NewMachines))
-		logging.FromContext(ctx).Debugf(msg)
-		for _, cn := range candidates {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
-		}
-		return Command{action: actionDoNothing}, nil
-	}
-
 	// get the current node price based on the offering
 	// fallback if we can't find the specific zonal pricing data
 	nodesPrice, err := getCandidatePrices(candidates)
@@ -189,19 +180,44 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
 
-	newInstanceTypes := strings.Join(lo.Map(lo.Slice(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), 0, 5), func(i *cloudprovider.InstanceType, _ int) string {
-		return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available(), results.NewMachines[0].Requirements))
-	}), " | ")
-
-	results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
-	if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-		logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s ...", candidateInstanceTypes, nodesPrice, newInstanceTypes)
-
-		for _, cn := range candidates {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f) with a cheaper node", candidateInstanceTypes, nodesPrice))...)
+	if len(results.NewMachines) != 1 {
+		newNodesPrice := float64(0)
+		for _, n := range results.NewMachines {
+			var cheapestInstanceTypeOption *cloudprovider.InstanceType
+			for _, i := range n.InstanceTypeOptions {
+				cheapestOffer := i.Offerings.Available().Requirements(n.Requirements).Cheapest()
+				if cheapestInstanceTypeOption == nil || cheapestOffer.Price < cheapestInstanceTypeOption.Offerings[0].Price {
+					cheapestInstanceTypeOption = i
+				}
+			}
+			n.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceTypeOption}
+			newNodesPrice += cheapestInstanceTypeOption.Offerings.Cheapest().Price
 		}
-		// no instance types remain after filtering by price
-		return Command{action: actionDoNothing}, nil
+
+		if newNodesPrice > nodesPrice {
+			logging.FromContext(ctx).
+				With("newNodesPrice", newNodesPrice).
+				With("candidateNodesPrice", nodesPrice).
+				Debugf("not replacing candidates with more expensive nodes")
+
+			return Command{action: actionDoNothing}, nil
+		}
+	} else {
+		newInstanceTypesSample := strings.Join(lo.Map(lo.Slice(results.NewMachines[0].InstanceTypeOptions.OrderByPrice(results.NewMachines[0].Requirements), 0, 5), func(i *cloudprovider.InstanceType, _ int) string {
+			return fmt.Sprintf("%s ($%.2f)", i.Name, worstLaunchPrice(i.Offerings.Available().Requirements(results.NewMachines[0].Requirements), results.NewMachines[0].Requirements))
+		}), "|")
+
+		results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
+
+		if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
+			logging.FromContext(ctx).Debugf("can't replace %s ($%.2f) with a cheaper node from %s...", candidateInstanceTypes, nodesPrice, newInstanceTypesSample)
+
+			for _, cn := range candidates {
+				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("can't replace %s ($%.2f)/hr with a cheaper node", candidateInstanceTypes, nodesPrice))...)
+			}
+			// no instance types remain after filtering by price
+			return Command{action: actionDoNothing}, nil
+		}
 	}
 
 	return Command{
