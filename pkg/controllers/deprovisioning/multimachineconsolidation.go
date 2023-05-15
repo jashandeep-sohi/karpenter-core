@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"strconv"
 
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -88,7 +90,12 @@ func (m *MultiMachineConsolidation) computeCommand(ctx context.Context, candidat
 	}
 
 	// introduce some chaos occasionally
-	if rand.Float64() < 0.3 {
+	chaosFactor, err := strconv.ParseFloat(os.Getenv("CHAOS_FACTOR"), 64)
+	if err != nil {
+		chaosFactor = 0
+	}
+
+	if rand.Float64() < chaosFactor {
 		if rand.Float64() < 0.5 {
 			logging.FromContext(ctx).Debug("reversing candidate disruption order")
 			// reverse
