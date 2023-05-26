@@ -161,8 +161,8 @@ func (v *Validation) ValidateCommand(ctx context.Context, cmd Command, candidate
 		return false, nil
 	}
 
-	// must create the same number of machines
-	if len(cmd.replacements) != len(results.NewMachines) {
+	// number of command replacements should never exceed validation replacements
+	if len(cmd.replacements) > len(results.NewMachines) {
 		return false, nil
 	}
 

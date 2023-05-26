@@ -182,29 +182,98 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
 
-	newNodesPrice := float64(0)
-	for _, n := range results.NewMachines {
-		var cheapestInstanceType *cloudprovider.InstanceType
-		var cheapestOffering *cloudprovider.Offering
-		for _, i := range n.InstanceTypeOptions {
-			of := i.Offerings.Available().Requirements(n.Requirements).Cheapest()
-			if cheapestInstanceType == nil || cheapestOffering == nil || of.Price < cheapestOffering.Price {
-				cheapestInstanceType = i
-				cheapestOffering = &of
-			}
-		}
+	// build up a map of instance type name -> list of candidates (sorted by price)
+	candidatesByInstanceType := lo.MapValues(
+		lo.GroupBy(candidates, func(c *Candidate) string {
+			return c.instanceType.Name
+		}),
+		func(cs []*Candidate, _ string) []*Candidate {
+			sort.Slice(cs, func(i, j int) bool {
+				a := cs[i]
+				b := cs[j]
 
-		if cheapestInstanceType == nil || cheapestOffering == nil {
-			continue
-		}
+				aOffering, _ := a.instanceType.Offerings.Get(a.capacityType, a.zone)
+				bOffering, _ := b.instanceType.Offerings.Get(b.capacityType, b.zone)
 
-		n.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceType}
-		n.Requirements.Add(
-			scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, cheapestOffering.CapacityType),
-			scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, cheapestOffering.Zone),
-		)
-		newNodesPrice += cheapestOffering.Price
+				return aOffering.Price < bOffering.Price
+			})
+			return cs
+		},
+	)
+
+	// for every new machine get the cheapest instance-type & offering
+	type cheapestInstanceTypeOffering struct {
+		instanceType *cloudprovider.InstanceType
+		offering     cloudprovider.Offering
 	}
+
+	type cheapestInstanceType struct {
+		machine  *pscheduling.Machine
+		cheapest *cheapestInstanceTypeOffering
+	}
+
+	cheapestMachines := lo.FilterMap(results.NewMachines, func(m *pscheduling.Machine, _ int) (*cheapestInstanceType, bool) {
+		cheapest := lo.MinBy(
+			lo.Map(m.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) *cheapestInstanceTypeOffering {
+				return &cheapestInstanceTypeOffering{it, it.Offerings.Available().Requirements(m.Requirements).Cheapest()}
+			}),
+			func(item *cheapestInstanceTypeOffering, min *cheapestInstanceTypeOffering) bool {
+				return item.offering.Price < min.offering.Price
+			},
+		)
+
+		// limit instance type to cheapest
+		m.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapest.instanceType}
+
+		// add a scheduling requirement to force the cheapest offering
+		m.Requirements.Add(
+			scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, cheapest.offering.CapacityType),
+			scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, cheapest.offering.Zone),
+		)
+
+		// filter pointless replacements
+		instanceTypeCandidates, ok := candidatesByInstanceType[m.InstanceTypeOptions[0].Name]
+
+		// no candidate of this type exists already; allow
+		if !ok {
+			return &cheapestInstanceType{m, cheapest}, true
+		}
+
+		// all exisiting candiadtes of this type are already used for other new machines; allow
+		if len(instanceTypeCandidates) == 0 {
+			return &cheapestInstanceType{m, cheapest}, true
+		}
+
+		cheapestInstanceTypeCandidate := instanceTypeCandidates[0]
+		cheapestInstanceTypeCandidateOffering, _ := cheapestInstanceTypeCandidate.instanceType.Offerings.Get(cheapestInstanceTypeCandidate.capacityType, cheapestInstanceTypeCandidate.zone)
+
+		// exisiting candidate of this type exists, but it's more expensive than the replacement; allow
+		if cheapest.offering.Price < cheapestInstanceTypeCandidateOffering.Price {
+			return &cheapestInstanceType{m, cheapest}, true
+		}
+
+		// exisiting candidate is the same as the replacement; disallow
+		candidatesByInstanceType[m.InstanceTypeOptions[0].Name] = lo.Slice(instanceTypeCandidates, 1, len(instanceTypeCandidates))
+		return nil, false
+	})
+
+	candidates = lo.FlatMap(lo.Values(candidatesByInstanceType), func(i []*Candidate, _ int) []*Candidate {
+		return i
+	})
+
+	results.NewMachines = lo.Map(cheapestMachines, func(i *cheapestInstanceType, _ int) *pscheduling.Machine {
+		return i.machine
+	})
+
+	if len(candidates) == 0 {
+		return Command{
+			action: actionDoNothing,
+		}, nil
+	}
+
+	newNodesPrice := lo.SumBy(cheapestMachines, func(i *cheapestInstanceType) float64 {
+		return i.cheapest.offering.Price
+	})
 
 	candidateInstanceTypesWithPrices := strings.Join(lo.Map(candidates, func(c *Candidate, _ int) string {
 		of, _ := c.instanceType.Offerings.Get(c.capacityType, c.zone)
