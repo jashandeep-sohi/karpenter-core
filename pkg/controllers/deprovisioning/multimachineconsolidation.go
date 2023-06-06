@@ -97,7 +97,7 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 			return candidatesByProvisionerName[n]
 		})
 
-		ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With(
+		ctx := logging.WithLogger(ctx, logging.FromContext(ctx).With(
 			"partitionedMultimachineConsolidation", true,
 			"provisionerNames", provisionerNames,
 		))
