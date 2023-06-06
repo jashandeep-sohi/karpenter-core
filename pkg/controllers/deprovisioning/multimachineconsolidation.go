@@ -19,15 +19,19 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/aws/karpenter-core/pkg/apis/v1alpha5"
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning/scheduling"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
+	cscheduling "github.com/aws/karpenter-core/pkg/scheduling"
+	"knative.dev/pkg/logging"
 )
 
 type MultiMachineConsolidation struct {
@@ -43,6 +47,77 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 	if m.cluster.Consolidated() {
 		return Command{action: actionDoNothing}, nil
 	}
+
+	// group candidates by provisioner name
+	candidatesByProvisionerName := lo.GroupBy(candidates, func(c *Candidate) string {
+		return c.provisioner.Name
+	})
+
+	// get provisioners
+	provisioners := lo.UniqBy(
+		lo.Map(candidates, func(c *Candidate, _ int) *v1alpha5.Provisioner {
+			return c.provisioner
+		}),
+		func(p *v1alpha5.Provisioner) string {
+			return p.Name
+		},
+	)
+
+	// group compatible provisioners
+	provisionerGroups := lo.Reduce(provisioners, func(agg [][]*v1alpha5.Provisioner, item *v1alpha5.Provisioner, _ int) [][]*v1alpha5.Provisioner {
+		for _, group := range agg {
+			if len(group) == 0 {
+				continue
+			}
+
+			aReq := cscheduling.NewNodeSelectorRequirements(group[0].Spec.Requirements...)
+			bReq := cscheduling.NewNodeSelectorRequirements(item.Spec.Requirements...)
+
+			if aReq.Compatible(bReq) == nil {
+				group = append(group, item)
+				return agg
+			}
+		}
+
+		agg = append(agg, []*v1alpha5.Provisioner{item})
+		return agg
+	}, [][]*v1alpha5.Provisioner{})
+
+	// shuffle the groups so that no one group ends up hogging the control loop every time
+	provisionerGroups = lo.Shuffle(provisionerGroups)
+
+	// attempt multi-machine consolidation per group
+
+	for _, provisionerGroup := range provisionerGroups {
+		provisionerNames := lo.Map(provisionerGroup, func(p *v1alpha5.Provisioner, _ int) string {
+			return p.Name
+		})
+
+		provisionerCandidates := lo.FlatMap(provisionerNames, func(n string, _ int) []*Candidate {
+			return candidatesByProvisionerName[n]
+		})
+
+		ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With(
+			"partitionedMultimachineConsolidation", true,
+			"provisionerNames", provisionerNames,
+		))
+
+		cmd, err := m.computePartitionCommand(ctx, provisionerCandidates...)
+		if err != nil {
+			// try the next provisioner
+			continue
+		}
+
+		if cmd.action != actionDoNothing {
+			return cmd, nil
+		}
+	}
+
+	return Command{action: actionDoNothing}, nil
+}
+
+func (m *MultiMachineConsolidation) computePartitionCommand(ctx context.Context, candidates ...*Candidate) (Command, error) {
+
 	candidates, err := m.sortAndFilterCandidates(ctx, candidates)
 	if err != nil {
 		return Command{}, fmt.Errorf("sorting candidates, %w", err)

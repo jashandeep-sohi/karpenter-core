@@ -19,10 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/samber/lo"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/clock"
+	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
 	deprovisioningevents "github.com/aws/karpenter-core/pkg/controllers/deprovisioning/events"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
+	pscheduling "github.com/aws/karpenter-core/pkg/controllers/provisioning/scheduling"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
 	"github.com/aws/karpenter-core/pkg/metrics"
@@ -97,6 +101,65 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 		c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("provisioner %s has consolidation disabled", cn.provisioner.Name))...)
 		return false
 	}
+
+	// only allow spot nodes if they are annotated
+	if cn.capacityType == v1alpha5.CapacityTypeSpot {
+		var err error
+
+		spotConsolidationAnnotationValue, hasSpotConsolidationAnnotation := cn.Node.Annotations[v1alpha5.SpotConsolidationAnnotationKey]
+
+		if !hasSpotConsolidationAnnotation || spotConsolidationAnnotationValue != "true" {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, "spot node is not annotated to allow consolidation")...)
+			return false
+		}
+
+		spotConsolidationWaitAfterCreationAnnotationValue, hasSpotConsolidationWaitAfterCreationAnnotation := cn.Node.Annotations[v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey]
+		spotConsolidationWaitAfterCreation := 5 * time.Minute
+
+		if hasSpotConsolidationWaitAfterCreationAnnotation {
+			spotConsolidationWaitAfterCreation, err = time.ParseDuration(spotConsolidationWaitAfterCreationAnnotationValue)
+
+			if err != nil {
+				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("unable to parse %s annotation duration: %v", v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey, err))...)
+				return false
+			}
+		}
+
+		spotConsolidationWaitAfterEmptyAnnotationValue, hasSpotConsolidationWaitAfterEmptyAnnotation := cn.Node.Annotations[v1alpha5.SpotConsolidationeWaitAfterEmptyAnnotationKey]
+		spotConsolidationWaitAfterEmpty := 5 * time.Minute
+
+		if hasSpotConsolidationWaitAfterEmptyAnnotation {
+			spotConsolidationWaitAfterEmpty, err = time.ParseDuration(spotConsolidationWaitAfterEmptyAnnotationValue)
+
+			if err != nil {
+				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("unable to parse %s annotation duration: %v", v1alpha5.SpotConsolidationeWaitAfterEmptyAnnotationKey, err))...)
+				return false
+			}
+		}
+
+		// if node is marked as empty karpenter.sh/spot-consolidation-wait-after-empty takes precedence
+		emptinessTimestamp, hasEmptinessTimestamp := cn.Node.Annotations[v1alpha5.EmptinessTimestampAnnotationKey]
+		if hasEmptinessTimestamp {
+			emptinessTime, err := time.Parse(time.RFC3339, emptinessTimestamp)
+			if err != nil {
+				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("unable to parse emptiness timestamp %s: %v", emptinessTimestamp, err))...)
+				return false
+			}
+
+			if c.clock.Now().Before(emptinessTime.Add(spotConsolidationWaitAfterEmpty)) {
+				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s to expire", v1alpha5.SpotConsolidationeWaitAfterEmptyAnnotationKey))...)
+				return false
+			}
+
+			return true
+		}
+
+		if c.clock.Now().Before(cn.Node.CreationTimestamp.Add(spotConsolidationWaitAfterCreation)) {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s to expire", v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey))...)
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -104,6 +167,14 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 //
 // nolint:gocyclo
 func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...*Candidate) (Command, error) {
+	candidateInstanceTypes := lo.Map(candidates, func(i *Candidate, _ int) string {
+		return i.instanceType.Name
+	})
+
+	ctx = logging.WithLogger(ctx, logging.FromContext(ctx).With("candidateInstanceTypes", candidateInstanceTypes))
+
+	logging.FromContext(ctx).Debugf("computing consolidation")
+
 	// Run scheduling simulation to compute consolidation option
 	results, err := simulateScheduling(ctx, c.kubeClient, c.cluster, c.provisioner, candidates...)
 	if err != nil {
@@ -145,41 +216,63 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 	if err != nil {
 		return Command{}, fmt.Errorf("getting offering price from candidate node, %w", err)
 	}
-	results.NewMachines[0].InstanceTypeOptions = filterByPrice(results.NewMachines[0].InstanceTypeOptions, results.NewMachines[0].Requirements, nodesPrice)
-	if len(results.NewMachines[0].InstanceTypeOptions) == 0 {
-		if len(candidates) == 1 {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, "can't replace with a cheaper node")...)
+
+	resultMachine := results.NewMachines[0]
+
+	type instanceTypeOfferingPair struct {
+		instanceType *cloudprovider.InstanceType
+		offering     cloudprovider.Offering
+	}
+
+	cheapestInstanceTypeOffering := lo.MinBy(
+		lo.Map(resultMachine.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) *instanceTypeOfferingPair {
+			return &instanceTypeOfferingPair{it, it.Offerings.Available().Requirements(resultMachine.Requirements).Cheapest()}
+		}),
+		func(item, min *instanceTypeOfferingPair) bool {
+			return item.offering.Price < min.offering.Price
+		},
+	)
+
+	// limit instance type to cheapest
+	resultMachine.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceTypeOffering.instanceType}
+
+	// add a scheduling requirement to force the cheapest offering
+	resultMachine.Requirements.Add(
+		scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, cheapestInstanceTypeOffering.offering.CapacityType),
+		scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, cheapestInstanceTypeOffering.offering.Zone),
+	)
+
+	newNodesPrice := cheapestInstanceTypeOffering.offering.Price
+
+	candidateInstanceTypesWithPrices := strings.Join(lo.Map(candidates, func(c *Candidate, _ int) string {
+		of, _ := c.instanceType.Offerings.Get(c.capacityType, c.zone)
+		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", c.instanceType.Name, c.capacityType, c.zone, of.Price)
+	}), ", ")
+
+	newInstanceTypesWithPrices := strings.Join(lo.Map(lo.Slice(results.NewMachines, 0, 1), func(m *pscheduling.Machine, _ int) string {
+		it := m.InstanceTypeOptions[0]
+		of := it.Offerings.Requirements(m.Requirements).Cheapest()
+		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", it.Name, of.CapacityType, of.Zone, of.Price)
+	}), ", ")
+
+	if nodesPrice-newNodesPrice < 0.0001 {
+		msg := fmt.Sprintf("will not replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
+		logging.FromContext(ctx).
+			With("newNodesPrice", newNodesPrice).
+			With("candidateNodesPrice", nodesPrice).
+			Debug(msg)
+
+		for _, cn := range candidates {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
 		}
-		// no instance types remain after filtering by price
+
 		return Command{action: actionDoNothing}, nil
 	}
 
-	// If the existing candidates are all spot and the replacement is spot, we don't consolidate.  We don't have a reliable
-	// mechanism to determine if this replacement makes sense given instance type availability (e.g. we may replace
-	// a spot node with one that is less available and more likely to be reclaimed).
-	allExistingAreSpot := true
-	for _, cn := range candidates {
-		if cn.capacityType != v1alpha5.CapacityTypeSpot {
-			allExistingAreSpot = false
-		}
-	}
-
-	if allExistingAreSpot &&
-		results.NewMachines[0].Requirements.Get(v1alpha5.LabelCapacityType).Has(v1alpha5.CapacityTypeSpot) {
-		if len(candidates) == 1 {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, "can't replace a spot node with a spot node")...)
-		}
-		return Command{action: actionDoNothing}, nil
-	}
-
-	// We are consolidating a node from OD -> [OD,Spot] but have filtered the instance types by cost based on the
-	// assumption, that the spot variant will launch. We also need to add a requirement to the node to ensure that if
-	// spot capacity is insufficient we don't replace the node with a more expensive on-demand node.  Instead the launch
-	// should fail and we'll just leave the node alone.
-	ctReq := results.NewMachines[0].Requirements.Get(v1alpha5.LabelCapacityType)
-	if ctReq.Has(v1alpha5.CapacityTypeSpot) && ctReq.Has(v1alpha5.CapacityTypeOnDemand) {
-		results.NewMachines[0].Requirements.Add(scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, v1alpha5.CapacityTypeSpot))
-	}
+	logging.FromContext(ctx).
+		With("newNodesPrice", newNodesPrice).
+		With("candidateNodesPrice", nodesPrice).
+		Debugf("replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
 
 	return Command{
 		candidates:   candidates,

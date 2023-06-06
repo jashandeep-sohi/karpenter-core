@@ -47,6 +47,20 @@ const (
 	VoluntaryDisruptionAnnotationKey  = Group + "/voluntary-disruption"
 	MachineLinkedAnnotationKey        = Group + "/linked"
 
+	// enable consolidation for spot instances
+	// "true" = enabled, everything else = disabled
+	SpotConsolidationAnnotationKey = Group + "/spot-consolidation"
+
+	// wait x duration after node creation before consolidating a spot instance
+	// ignored if spot-consolidate annotation is not set or enabled
+	// default is 5 mins
+	SpotConsolidationeWaitAfterCreationAnnotationKey = Group + "/spot-consolidation-wait-after-creation"
+
+	// wait x duration after node is marked empty before consolidating a spot instance
+	// ignored if spot-consolidate annotation is not set or enabled
+	// default is 5 mins
+	SpotConsolidationeWaitAfterEmptyAnnotationKey = Group + "/spot-consolidation-wait-after-empty"
+
 	ProviderCompatabilityAnnotationKey = CompatabilityGroup + "/provider"
 
 	// Karpenter specific annotation values

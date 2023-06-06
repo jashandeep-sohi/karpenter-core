@@ -43,7 +43,7 @@ type Emptiness struct {
 // Reconcile reconciles the node
 func (r *Emptiness) Reconcile(ctx context.Context, provisioner *v1alpha5.Provisioner, n *v1.Node) (reconcile.Result, error) {
 	// Ignore node if not applicable
-	if provisioner.Spec.TTLSecondsAfterEmpty == nil {
+	if provisioner.Spec.TTLSecondsAfterEmpty == nil || provisioner.Spec.Consolidation == nil || provisioner.Spec.Consolidation.Enabled == nil || *provisioner.Spec.Consolidation.Enabled == false {
 		return reconcile.Result{}, nil
 	}
 
