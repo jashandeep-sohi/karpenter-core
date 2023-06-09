@@ -23,6 +23,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"knative.dev/pkg/logging"
+	"knative.dev/pkg/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -43,7 +44,7 @@ type Emptiness struct {
 // Reconcile reconciles the node
 func (r *Emptiness) Reconcile(ctx context.Context, provisioner *v1alpha5.Provisioner, n *v1.Node) (reconcile.Result, error) {
 	// Ignore node if not applicable
-	if provisioner.Spec.TTLSecondsAfterEmpty == nil || provisioner.Spec.Consolidation == nil || provisioner.Spec.Consolidation.Enabled == nil || *provisioner.Spec.Consolidation.Enabled == false {
+	if !(provisioner.Spec.TTLSecondsAfterEmpty != nil || provisioner.Spec.Consolidation != nil && ptr.BoolValue(provisioner.Spec.Consolidation.Enabled)) {
 		return reconcile.Result{}, nil
 	}
 
