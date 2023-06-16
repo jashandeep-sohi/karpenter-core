@@ -95,16 +95,20 @@ func simulateScheduling(ctx context.Context, kubeClient client.Client, cluster *
 		return nil, fmt.Errorf("determining pending pods, %w", err)
 	}
 
-	// get provisioners
-	var provisioners v1alpha5.ProvisionerList
-	if err := kubeClient.List(ctx, &provisioners); err != nil {
-		return nil, fmt.Errorf("listing provisioners, %w", err)
-	}
+	// get candidate provisioners
+	provisioners := lo.UniqBy(
+		lo.Map(candidates, func(c *Candidate, _ int) *v1alpha5.Provisioner {
+			return c.provisioner
+		}),
+		func(p *v1alpha5.Provisioner) string {
+			return p.Name
+		},
+	)
 
 	// we only care about pods that are actually compatible with any provisioners
 	// otherwise consolidation will just end up failing on Pod errors
 	pods := lo.Filter(pendingPods, func(p *v1.Pod, _ int) bool {
-		return lo.SomeBy(provisioners.Items, func(prov v1alpha5.Provisioner) bool {
+		return lo.SomeBy(provisioners, func(prov *v1alpha5.Provisioner) bool {
 			if scheduling.NewNodeSelectorRequirements(prov.Spec.Requirements...).Compatible(scheduling.NewPodRequirements(p)) == nil {
 				return true
 			}
