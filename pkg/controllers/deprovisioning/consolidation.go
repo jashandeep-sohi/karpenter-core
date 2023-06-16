@@ -278,7 +278,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		", ",
 	)
 
-	logging.FromContext(ctx).Debugf("replace %s from %s", candidateInstanceTypesWithPrices, newInstanceTypesWithPrices)
+	logging.FromContext(ctx).Debugf("replace %s (total: %.5f) from %s", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices)
 
 	return Command{
 		candidates:   candidates,
