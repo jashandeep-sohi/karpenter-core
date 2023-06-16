@@ -33,11 +33,9 @@ import (
 	"github.com/aws/karpenter-core/pkg/cloudprovider"
 	deprovisioningevents "github.com/aws/karpenter-core/pkg/controllers/deprovisioning/events"
 	"github.com/aws/karpenter-core/pkg/controllers/provisioning"
-	pscheduling "github.com/aws/karpenter-core/pkg/controllers/provisioning/scheduling"
 	"github.com/aws/karpenter-core/pkg/controllers/state"
 	"github.com/aws/karpenter-core/pkg/events"
 	"github.com/aws/karpenter-core/pkg/metrics"
-	"github.com/aws/karpenter-core/pkg/scheduling"
 )
 
 // consolidation is the base consolidation controller that provides common functionality used across the different
@@ -230,48 +228,36 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	resultMachine := results.NewMachines[0]
 
-	type instanceTypeOfferingPair struct {
-		instanceType *cloudprovider.InstanceType
-		offering     cloudprovider.Offering
-	}
+	cheaperInstanceTypeOptions := lo.FilterMap(resultMachine.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) (*cloudprovider.InstanceType, bool) {
+		cheaperOfferings := lo.Filter(it.Offerings.Available().Requirements(resultMachine.Requirements), func(of cloudprovider.Offering, _ int) bool {
+			if nodesPrice-of.Price < 0.001 {
+				return false
+			}
+			return true
+		})
 
-	cheapestInstanceTypeOffering := lo.MinBy(
-		lo.Map(resultMachine.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) *instanceTypeOfferingPair {
-			return &instanceTypeOfferingPair{it, it.Offerings.Available().Requirements(resultMachine.Requirements).Cheapest()}
+		if len(cheaperOfferings) == 0 {
+			return nil, false
+		}
+
+		itCopy := *it
+		itCopy.Offerings = cheaperOfferings
+
+		return &itCopy, true
+	})
+
+	candidateInstanceTypesWithPrices := strings.Join(
+		lo.Map(candidates, func(c *Candidate, _ int) string {
+			of, _ := c.instanceType.Offerings.Get(c.capacityType, c.zone)
+			return fmt.Sprintf("%s/%s/%s/%s ($%.5f/hr)", c.Name(), c.instanceType.Name, c.capacityType, c.zone, of.Price)
 		}),
-		func(item, min *instanceTypeOfferingPair) bool {
-			return item.offering.Price < min.offering.Price
-		},
+		", ",
 	)
 
-	// limit instance type to cheapest
-	resultMachine.InstanceTypeOptions = cloudprovider.InstanceTypes{cheapestInstanceTypeOffering.instanceType}
+	if len(cheaperInstanceTypeOptions) == 0 {
+		msg := fmt.Sprintf("no cheaper options found for %s", candidateInstanceTypesWithPrices)
 
-	// add a scheduling requirement to force the cheapest offering
-	resultMachine.Requirements.Add(
-		scheduling.NewRequirement(v1alpha5.LabelCapacityType, v1.NodeSelectorOpIn, cheapestInstanceTypeOffering.offering.CapacityType),
-		scheduling.NewRequirement(v1.LabelTopologyZone, v1.NodeSelectorOpIn, cheapestInstanceTypeOffering.offering.Zone),
-	)
-
-	newNodesPrice := cheapestInstanceTypeOffering.offering.Price
-
-	candidateInstanceTypesWithPrices := strings.Join(lo.Map(candidates, func(c *Candidate, _ int) string {
-		of, _ := c.instanceType.Offerings.Get(c.capacityType, c.zone)
-		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", c.instanceType.Name, c.capacityType, c.zone, of.Price)
-	}), ", ")
-
-	newInstanceTypesWithPrices := strings.Join(lo.Map(lo.Slice(results.NewMachines, 0, 1), func(m *pscheduling.Machine, _ int) string {
-		it := m.InstanceTypeOptions[0]
-		of := it.Offerings.Requirements(m.Requirements).Cheapest()
-		return fmt.Sprintf("%s/%s/%s ($%.6f/hr)", it.Name, of.CapacityType, of.Zone, of.Price)
-	}), ", ")
-
-	if nodesPrice-newNodesPrice < 0.0001 {
-		msg := fmt.Sprintf("will not replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
-		logging.FromContext(ctx).
-			With("newNodesPrice", newNodesPrice).
-			With("candidateNodesPrice", nodesPrice).
-			Debug(msg)
+		logging.FromContext(ctx).Debug(msg)
 
 		for _, cn := range candidates {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, msg)...)
@@ -280,10 +266,19 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{action: actionDoNothing}, nil
 	}
 
-	logging.FromContext(ctx).
-		With("newNodesPrice", newNodesPrice).
-		With("candidateNodesPrice", nodesPrice).
-		Debugf("replace %s; (total $%.6f/hr) with %s (total $%.6f/hr)", candidateInstanceTypesWithPrices, nodesPrice, newInstanceTypesWithPrices, newNodesPrice)
+	// limit result machine to cheaper instance types
+	resultMachine.InstanceTypeOptions = cheaperInstanceTypeOptions
+
+	newInstanceTypesWithPrices := strings.Join(
+		lo.FlatMap(resultMachine.InstanceTypeOptions, func(it *cloudprovider.InstanceType, _ int) []string {
+			return lo.Map(it.Offerings, func(of cloudprovider.Offering, _ int) string {
+				return fmt.Sprintf("%s/%s/%s ($%.5f/hr)", it.Name, of.CapacityType, of.Zone, of.Price)
+			})
+		}),
+		", ",
+	)
+
+	logging.FromContext(ctx).Debugf("replace %s from %s", candidateInstanceTypesWithPrices, newInstanceTypesWithPrices)
 
 	return Command{
 		candidates:   candidates,
