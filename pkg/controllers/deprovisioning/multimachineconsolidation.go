@@ -158,9 +158,12 @@ func (m *MultiMachineConsolidation) firstNMachineConsolidationOption(ctx context
 		max = len(candidates) - 1
 	}
 
+	// look at all candidates together first
+	max = 2 * max
+
 	lastSavedCommand := Command{action: actionDoNothing}
 	// binary search to find the maximum number of machines we can terminate
-	for min <= max {
+	for min <= max && min < len(candidates)-1 {
 		mid := (min + max) / 2
 
 		candidatesToConsolidate := candidates[0 : mid+1]
