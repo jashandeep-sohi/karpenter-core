@@ -189,8 +189,8 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
 		logging.FromContext(ctx).
-			With("podErros", lo.MapEntries(results.PodErrors, func(p *v1.Pod, err error) (string, string) {
-				return fmt.Sprintf("%s/%s", p.Namespace, p.Name), fmt.Sprintf("%s", err)
+			With("podErros", lo.MapKeys(results.PodErrors, func(_ error, p *v1.Pod) string {
+				return fmt.Sprintf("%s/%s", p.Namespace, p.Name)
 			})).
 			Debugf("failed to schedule all pods")
 

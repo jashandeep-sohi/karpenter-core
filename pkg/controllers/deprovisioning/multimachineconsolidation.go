@@ -83,11 +83,9 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 		return agg
 	}, [][]*v1alpha5.Provisioner{})
 
-	// shuffle the groups so that no one group ends up hogging the control loop every time
-	provisionerGroups = lo.Shuffle(provisionerGroups)
+	lastCmd := Command{action: actionDoNothing}
 
 	// attempt multi-machine consolidation per group
-
 	for _, provisionerGroup := range provisionerGroups {
 		provisionerNames := lo.Map(provisionerGroup, func(p *v1alpha5.Provisioner, _ int) string {
 			return p.Name
@@ -108,12 +106,14 @@ func (m *MultiMachineConsolidation) ComputeCommand(ctx context.Context, candidat
 			continue
 		}
 
-		if cmd.action != actionDoNothing {
-			return cmd, nil
+		// pick the command that does the most work
+		if cmd.action != actionDoNothing && len(cmd.candidates) > len(lastCmd.candidates) || len(cmd.replacements) > len(lastCmd.replacements) {
+			lastCmd = cmd
 		}
+
 	}
 
-	return Command{action: actionDoNothing}, nil
+	return lastCmd, nil
 }
 
 func (m *MultiMachineConsolidation) computePartitionCommand(ctx context.Context, candidates ...*Candidate) (Command, error) {
