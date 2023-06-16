@@ -18,6 +18,9 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand"
+	"os"
+	"strconv"
 
 	"github.com/samber/lo"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -123,6 +126,26 @@ func (m *MultiMachineConsolidation) computePartitionCommand(ctx context.Context,
 		return Command{}, fmt.Errorf("sorting candidates, %w", err)
 	}
 	deprovisioningEligibleMachinesGauge.WithLabelValues(m.String()).Set(float64(len(candidates)))
+
+	// introduce some chaos occasionally
+	chaosFactor, err := strconv.ParseFloat(os.Getenv("CHAOS_FACTOR"), 64)
+	if err != nil {
+		chaosFactor = 0
+	}
+
+	if rand.Float64() < chaosFactor {
+		if rand.Float64() < 0.5 {
+			logging.FromContext(ctx).Debug("reversing candidate disruption order")
+			for i, j := 0, len(candidates)-1; i < j; i, j = i+1, j-1 {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		} else {
+			logging.FromContext(ctx).Debug("shuffling candidates")
+			rand.Shuffle(len(candidates), func(i, j int) {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			})
+		}
+	}
 
 	// For now, we will consider up to every machine in the cluster, might be configurable in the future.
 	maxParallel := len(candidates)
