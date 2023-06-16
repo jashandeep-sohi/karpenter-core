@@ -113,6 +113,7 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 			return false
 		}
 
+		// parse the annoations
 		spotConsolidationWaitAfterCreationAnnotationValue, hasSpotConsolidationWaitAfterCreationAnnotation := cn.Node.Annotations[v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey]
 		spotConsolidationWaitAfterCreation := 5 * time.Minute
 
@@ -137,25 +138,27 @@ func (c *consolidation) ShouldDeprovision(_ context.Context, cn *Candidate) bool
 			}
 		}
 
-		// if node is marked as empty karpenter.sh/spot-consolidation-wait-after-empty takes precedence
-		emptinessTimestamp, hasEmptinessTimestamp := cn.Node.Annotations[v1alpha5.EmptinessTimestampAnnotationKey]
-		if hasEmptinessTimestamp {
-			emptinessTime, err := time.Parse(time.RFC3339, emptinessTimestamp)
-			if err != nil {
-				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("unable to parse emptiness timestamp %s: %v", emptinessTimestamp, err))...)
-				return false
-			}
-
-			if c.clock.Now().Before(emptinessTime.Add(spotConsolidationWaitAfterEmpty)) {
-				c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s to expire", v1alpha5.SpotConsolidationeWaitAfterEmptyAnnotationKey))...)
-				return false
-			}
-
+		// if spot-consolidation-wait-after-creation timeout has expired, it takes precedence
+		if c.clock.Now().After(cn.Node.CreationTimestamp.Add(spotConsolidationWaitAfterCreation)) {
 			return true
 		}
 
-		if c.clock.Now().Before(cn.Node.CreationTimestamp.Add(spotConsolidationWaitAfterCreation)) {
-			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s to expire", v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey))...)
+		c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s=%s to expire", v1alpha5.SpotConsolidationeWaitAfterCreationAnnotationKey, spotConsolidationWaitAfterCreationAnnotationValue))...)
+
+		// otherwise check if the empty timeout has expired
+		emptinessTimestamp, hasEmptinessTimestamp := cn.Node.Annotations[v1alpha5.EmptinessTimestampAnnotationKey]
+		if !hasEmptinessTimestamp {
+			return false
+		}
+
+		emptinessTime, err := time.Parse(time.RFC3339, emptinessTimestamp)
+		if err != nil {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("unable to parse emptiness timestamp %s: %v", emptinessTimestamp, err))...)
+			return false
+		}
+
+		if c.clock.Now().Before(emptinessTime.Add(spotConsolidationWaitAfterEmpty)) {
+			c.recorder.Publish(deprovisioningevents.Unconsolidatable(cn.Node, fmt.Sprintf("waiting for %s=%s to expire", v1alpha5.SpotConsolidationeWaitAfterEmptyAnnotationKey, spotConsolidationWaitAfterEmptyAnnotationValue))...)
 			return false
 		}
 	}
@@ -187,6 +190,12 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// if not all of the pods were scheduled, we can't do anything
 	if !results.AllPodsScheduled() {
+		logging.FromContext(ctx).
+			With("pods", lo.Map(lo.Keys(results.PodErrors), func(p *v1.Pod, _ int) string {
+				return fmt.Sprintf("%s/%s", p.Namespace, p.Name)
+			})).
+			Debugf("failed to schedule all pods")
+
 		// This method is used by multi-node consolidation as well, so we'll only report in the single node case
 		if len(candidates) == 1 {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, results.PodSchedulingErrors())...)
@@ -196,6 +205,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// were we able to schedule all the pods on the inflight candidates?
 	if len(results.NewMachines) == 0 {
+		logging.FromContext(ctx).Debugf("all Pods can fit without candidate(s)")
 		return Command{
 			candidates: candidates,
 			action:     actionDelete,
@@ -204,6 +214,7 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 
 	// we're not going to turn a single node into multiple candidates
 	if len(results.NewMachines) != 1 {
+		logging.FromContext(ctx).Debugf("will not consolidate to more than 1 node")
 		if len(candidates) == 1 {
 			c.recorder.Publish(deprovisioningevents.Unconsolidatable(candidates[0].Node, fmt.Sprintf("can't remove without creating %d candidates", len(results.NewMachines)))...)
 		}
