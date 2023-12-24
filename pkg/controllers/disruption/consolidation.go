@@ -158,25 +158,75 @@ func (c *consolidation) computeConsolidation(ctx context.Context, candidates ...
 		return Command{}, nil
 	}
 
-	// If the existing candidates are all spot and the replacement is spot, we don't consolidate.  We don't have a reliable
-	// mechanism to determine if this replacement makes sense given instance type availability (e.g. we may replace
-	// a spot node with one that is less available and more likely to be reclaimed).
 	allExistingAreSpot := true
 	for _, cn := range candidates {
 		if cn.capacityType != v1beta1.CapacityTypeSpot {
 			allExistingAreSpot = false
+			break
 		}
 	}
 
-	if allExistingAreSpot &&
-		results.NewNodeClaims[0].Requirements.Get(v1beta1.CapacityTypeLabelKey).Has(v1beta1.CapacityTypeSpot) {
-		if len(candidates) == 1 {
-			c.recorder.Publish(disruptionevents.Unconsolidatable(candidates[0].Node, candidates[0].NodeClaim, "Can't replace a spot node with a spot node")...)
+	if allExistingAreSpot && results.NewNodeClaims[0].Requirements.Get(v1beta1.CapacityTypeLabelKey).Has(v1beta1.CapacityTypeSpot) {
+		spotNotReplaceable := false
+		for _, cn := range candidates {
+			spotReplaceAfterValue, hasSpotReplaceAfterAnnotation := cn.Annotations()[v1beta1.SpotConsolidationReplaceAfterAnnotationKey]
+			if !hasSpotReplaceAfterAnnotation {
+				spotNotReplaceable = false
+				continue
+			}
+			var duration v1beta1.NillableDuration
+
+			err := duration.UnmarshalJSON([]byte(spotReplaceAfterValue))
+			if err != nil {
+				c.recorder.Publish(disruptionevents.Unconsolidatable(
+					cn.Node,
+					cn.NodeClaim,
+					fmt.Sprintf(
+						"skip spot node replace consolidation: failed to parse annotation %v: %v: %v",
+						v1beta1.SpotConsolidationReplaceAfterAnnotationKey,
+						spotReplaceAfterValue,
+						err,
+					),
+				)...)
+				spotNotReplaceable = true
+				continue
+			}
+
+			if duration.Duration == nil {
+				spotNotReplaceable = true
+				continue
+			}
+
+			if cn.NodeClaim == nil {
+				spotNotReplaceable = true
+				continue
+			}
+
+			initialized := cn.NodeClaim.StatusConditions().GetCondition(v1beta1.Initialized)
+			if initialized == nil {
+				spotNotReplaceable = true
+				continue
+			}
+
+			if c.clock.Now().Before(initialized.LastTransitionTime.Inner.Add(*duration.Duration)) {
+				c.recorder.Publish(disruptionevents.Unconsolidatable(
+					cn.Node,
+					cn.NodeClaim,
+					fmt.Sprintf(
+						"skip spot node replace consolidation until %v",
+						initialized.LastTransitionTime.Inner.Add(*duration.Duration),
+					),
+				)...)
+				spotNotReplaceable = true
+				continue
+			}
 		}
-		return Command{}, nil
+		if spotNotReplaceable {
+			return Command{}, nil
+		}
 	}
 
-	// We are consolidating a node from OD -> [OD,Spot] but have filtered the instance types by cost based on the
+	// We are consolidating a node from [OD,Spot] -> [OD,Spot] but have filtered the instance types by cost based on the
 	// assumption, that the spot variant will launch. We also need to add a requirement to the node to ensure that if
 	// spot capacity is insufficient we don't replace the node with a more expensive on-demand node.  Instead the launch
 	// should fail and we'll just leave the node alone.
