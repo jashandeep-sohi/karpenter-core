@@ -46,6 +46,10 @@ const (
 	ProviderCompatabilityAnnotationKey = CompatabilityGroup + "/provider"
 	ManagedByAnnotationKey             = Group + "/managed-by"
 	NodePoolHashAnnotationKey          = Group + "/nodepool-hash"
+
+	// Duration to wait before a spot node is replaceable after initialization.
+	// If not set or set to 'Never', then replace spot consolidation will be disabled for that paticular node.
+	SpotConsolidationReplaceAfterAnnotationKey = Group + "/spot-consolidation-replace-after"
 )
 
 // Karpenter specific finalizers
